@@ -11,9 +11,11 @@ BOSS_BOT_TOKEN = "8557427092:AAHDt9lqKfJxddyJQQawa-1lt0mHmaaRjoc"
 OWNER_ID = 6940098775  # your telegram numeric id
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_DIR = os.path.join(BASE_DIR, "users")
-TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 DB_FILE = os.path.join(BASE_DIR, "users.db")
-# ==========================================
+
+BOT_FILES = ["spbot5.py", "msg.py"]
+ENV_TEMPLATE = "rename to .env"
+# =========================================
 
 os.makedirs(USERS_DIR, exist_ok=True)
 
@@ -24,7 +26,6 @@ cur = conn.cursor()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    role TEXT,
     bot_limit INTEGER
 )
 """)
@@ -38,123 +39,109 @@ CREATE TABLE IF NOT EXISTS bots (
 """)
 conn.commit()
 
-def get_user(user_id):
-    cur.execute("SELECT role, bot_limit FROM users WHERE user_id=?", (user_id,))
-    return cur.fetchone()
-
-def ensure_user(user_id):
-    user = get_user(user_id)
-    if not user:
-        role = "owner" if user_id == OWNER_ID else "user"
-        limit_ = 9999 if role == "owner" else 1
-        cur.execute("INSERT INTO users VALUES (?,?,?)", (user_id, role, limit_))
+def ensure_user(uid):
+    cur.execute("SELECT bot_limit FROM users WHERE user_id=?", (uid,))
+    if not cur.fetchone():
+        limit_ = 9999 if uid == OWNER_ID else 1
+        cur.execute("INSERT INTO users VALUES (?,?)", (uid, limit_))
         conn.commit()
 
-def running_bots(user_id):
-    cur.execute("SELECT COUNT(*) FROM bots WHERE user_id=? AND status='running'", (user_id,))
+def running_bots(uid):
+    cur.execute("SELECT COUNT(*) FROM bots WHERE user_id=? AND status='running'", (uid,))
     return cur.fetchone()[0]
 
-# ================= BOT COMMANDS =================
+# ================= BOT =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ensure_user(user_id)
+    ensure_user(update.effective_user.id)
     await update.message.reply_text(
         "🤖 Boss Bot Ready\n\n"
         "/addbot – Host your bot\n"
-        "/stopbot – Stop your bot\n"
+        "/stopbot – Stop bot\n"
         "/status – Bot status"
     )
 
 async def addbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ensure_user(user_id)
+    uid = update.effective_user.id
+    ensure_user(uid)
 
-    role, limit_ = get_user(user_id)
-    if running_bots(user_id) >= limit_:
+    cur.execute("SELECT bot_limit FROM users WHERE user_id=?", (uid,))
+    limit_ = cur.fetchone()[0]
+
+    if running_bots(uid) >= limit_:
         await update.message.reply_text("❌ Bot limit reached")
         return
 
-    await update.message.reply_text("Send BOT TOKEN:")
     context.user_data["step"] = "token"
+    await update.message.reply_text("Send BOT TOKEN:")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     text = update.message.text.strip()
 
-    step = context.user_data.get("step")
-
-    if step == "token":
-        context.user_data["bot_token"] = text
+    if context.user_data.get("step") == "token":
+        context.user_data["token"] = text
         context.user_data["step"] = "chat"
         await update.message.reply_text("Send CHAT ID:")
         return
 
-    if step == "chat":
-        bot_token = context.user_data["bot_token"]
+    if context.user_data.get("step") == "chat":
+        token = context.user_data["token"]
         chat_id = text
 
-        user_dir = os.path.join(USERS_DIR, f"user_{user_id}")
+        user_dir = os.path.join(USERS_DIR, f"user_{uid}")
         os.makedirs(user_dir, exist_ok=True)
 
-        shutil.copy(os.path.join(TEMPLATE_DIR, "spbot5.py"), user_dir)
-        shutil.copy(os.path.join(TEMPLATE_DIR, "msg.py"), user_dir)
+        for f in BOT_FILES:
+            shutil.copy(os.path.join(BASE_DIR, f), user_dir)
 
-        env_path = os.path.join(user_dir, ".env")
-        with open(os.path.join(TEMPLATE_DIR, "env.template")) as f:
-            env_data = f.read()
+        with open(os.path.join(BASE_DIR, ENV_TEMPLATE)) as f:
+            env = f.read()
 
-        env_data = env_data.replace("BOT_TOKEN=", f"BOT_TOKEN={bot_token}")
-        env_data = env_data.replace("CHAT_ID=", f"CHAT_ID={chat_id}")
-        env_data = env_data.replace("OWNER_TG_ID=", f"OWNER_TG_ID={OWNER_ID}")
+        env = env.replace("BOT_TOKEN=", f"BOT_TOKEN={token}")
+        env = env.replace("CHAT_ID=", f"CHAT_ID={chat_id}")
+        env = env.replace("OWNER_TG_ID=", f"OWNER_TG_ID={OWNER_ID}")
 
-        with open(env_path, "w") as f:
-            f.write(env_data)
+        with open(os.path.join(user_dir, ".env"), "w") as f:
+            f.write(env)
 
-        proc = subprocess.Popen(
-            ["python3", "spbot5.py"],
-            cwd=user_dir
-        )
+        proc = subprocess.Popen(["python3", "spbot5.py"], cwd=user_dir)
 
-        cur.execute("INSERT INTO bots VALUES (?,?,?)", (user_id, proc.pid, "running"))
+        cur.execute("INSERT INTO bots VALUES (?,?,?)", (uid, proc.pid, "running"))
         conn.commit()
 
-        await update.message.reply_text("✅ Bot started successfully!")
+        await update.message.reply_text("✅ Bot started")
         context.user_data.clear()
 
 async def stopbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cur.execute("SELECT pid FROM bots WHERE user_id=? AND status='running'", (user_id,))
+    uid = update.effective_user.id
+    cur.execute("SELECT pid FROM bots WHERE user_id=? AND status='running'", (uid,))
     row = cur.fetchone()
 
     if not row:
         await update.message.reply_text("❌ No running bot")
         return
 
-    pid = row[0]
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(row[0], signal.SIGTERM)
     except:
         pass
 
-    cur.execute("UPDATE bots SET status='stopped' WHERE user_id=?", (user_id,))
+    cur.execute("UPDATE bots SET status='stopped' WHERE user_id=?", (uid,))
     conn.commit()
 
     await update.message.reply_text("🛑 Bot stopped")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cur.execute("SELECT status FROM bots WHERE user_id=?", (user_id,))
+    uid = update.effective_user.id
+    cur.execute("SELECT status FROM bots WHERE user_id=?", (uid,))
     row = cur.fetchone()
-    if row:
-        await update.message.reply_text(f"📊 Bot status: {row[0]}")
-    else:
-        await update.message.reply_text("ℹ️ No bot found")
+    await update.message.reply_text(
+        f"📊 Bot status: {row[0]}" if row else "ℹ️ No bot found"
+    )
 
-# ================= OWNER COMMAND =================
 async def setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
-
     try:
         uid = int(context.args[0])
         limit_ = int(context.args[1])
@@ -166,13 +153,12 @@ async def setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= RUN =================
 app = ApplicationBuilder().token(BOSS_BOT_TOKEN).build()
-
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("addbot", addbot))
 app.add_handler(CommandHandler("stopbot", stopbot))
 app.add_handler(CommandHandler("status", status))
 app.add_handler(CommandHandler("setlimit", setlimit))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 print("🔥 Boss Bot Running")
 app.run_polling()
